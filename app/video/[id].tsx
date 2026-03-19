@@ -80,57 +80,33 @@ export default function VideoScreen() {
 
   async function summarizeVideo(v: Video) {
     try {
-      let transcript = ''
-      try {
-        transcript = await getTranscript(v.youtube_video_id)
-        console.log('transcript length:', transcript.length)
-      } catch (e) {
-        console.log('transcript error:', e)
-        transcript = `[No transcript available. Video title: "${v.title}"]`
-      }
+      const {
+        data: { session },
+      } = await supabase.auth.getSession()
 
-      const prompt = `You are reviewing a YouTube video made by a child (age 9-11) for their parent.
+      const res = await fetch(
+        `${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/summarize-video`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY}`,
+          },
+          body: JSON.stringify({
+            videoId: v.id,
+            videoTitle: v.title,
+            videoDescription: v.description,
+            youtubeVideoId: v.youtube_video_id,
+          }),
+        }
+      )
 
-Video title: "${v.title}"
+      const result = await res.json()
+      console.log('edge function result:', JSON.stringify(result).slice(0, 200))
 
-Transcript:
-${transcript.slice(0, 6000)}
+      if (!result.success) throw new Error(result.error)
 
-Respond with ONLY a JSON object:
-{
-  "summary": "3-4 warm sentences about what the video is about. Write like you're texting a busy parent.",
-  "green_flags": ["positive things — creativity, kindness, impressive skills, things to praise"],
-  "red_flags": ["anything worth a conversation — language, risky behavior. Empty array if none."],
-  "talking_points": [
-    {"label": "short topic", "point": "A concrete conversation starter the parent could use"}
-  ]
-}`
-
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.EXPO_PUBLIC_ANTHROPIC_API_KEY!,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      })
-
-      const data = await res.json()
-      console.log('claude status:', res.status)
-      console.log('claude response:', JSON.stringify(data).slice(0, 300))
-
-      const text = data.content?.[0]?.text || ''
-      const jsonMatch = text
-        .replace(/```json|```/g, '')
-        .trim()
-        .match(/\{[\s\S]*\}/)
-      if (!jsonMatch) throw new Error('Could not parse response')
-      const parsed = JSON.parse(jsonMatch[0])
+      const parsed = result.data
 
       const { data: saved, error: saveError } = await supabase
         .from('summaries')
@@ -145,7 +121,6 @@ Respond with ONLY a JSON object:
         .single()
 
       console.log('save error:', saveError)
-      console.log('saved:', saved?.id)
 
       if (intervalRef.current) clearInterval(intervalRef.current)
       setProgress(100)
@@ -159,36 +134,6 @@ Respond with ONLY a JSON object:
       if (intervalRef.current) clearInterval(intervalRef.current)
       setProcessing(false)
     }
-  }
-
-  async function getTranscript(videoId: string): Promise<string> {
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`
-    const res = await fetch(proxyUrl)
-    const data = await res.json()
-    const html = data.contents || ''
-    console.log('html length:', html.length)
-    const captionMatch = html.match(/"captionTracks":\s*\[.*?"baseUrl":\s*"([^"]+)"/)
-    console.log('caption match:', captionMatch ? 'found' : 'not found')
-
-    if (!captionMatch) throw new Error('No captions')
-    const captionUrl = captionMatch[1].replace(/\\u0026/g, '&')
-    const capRes = await fetch(
-      `https://api.allorigins.win/get?url=${encodeURIComponent(captionUrl)}`
-    )
-    const capData = await capRes.json()
-    const parser = new DOMParser()
-    const doc = parser.parseFromString(capData.contents, 'text/xml')
-    const nodeList = doc.querySelectorAll('text')
-    return Array.from(nodeList)
-      .map((t) => t.textContent)
-      .join(' ')
-  }
-
-  function formatDuration(seconds: number | null) {
-    if (!seconds) return ''
-    const m = Math.floor(seconds / 60)
-    const s = seconds % 60
-    return `${m}:${String(s).padStart(2, '0')}`
   }
 
   if (!video) return <ActivityIndicator style={{ flex: 1 }} />

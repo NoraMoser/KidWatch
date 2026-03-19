@@ -24,6 +24,7 @@ export type Video = {
   published_at: string | null
   seen: boolean
   created_at: string
+  description: string | null
   summaries?: { id: string }[]
 }
 

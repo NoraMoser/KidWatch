@@ -11,9 +11,9 @@ import {
 import { useEffect, useState, useRef } from 'react'
 import { useLocalSearchParams } from 'expo-router'
 import { supabase } from '../../lib/supabase'
-import type { Video, Summary } from '../../lib/types'
+import type { Video, Summary, Comment } from '../../lib/types'
 
-type Tab = 'summary' | 'flags' | 'talking'
+type Tab = 'summary' | 'flags' | 'talking' | 'comments'
 
 export default function VideoScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
@@ -24,6 +24,9 @@ export default function VideoScreen() {
   const [step, setStep] = useState(0)
   const [progress, setProgress] = useState(0)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [comments, setComments] = useState<Comment[]>([])
+  const [commentsLoading, setCommentsLoading] = useState(false)
+  const [commentsLoaded, setCommentsLoaded] = useState(false)
 
   const steps = [
     { label: 'Fetching transcript', emoji: '📡' },
@@ -41,16 +44,10 @@ export default function VideoScreen() {
 
   async function loadVideo() {
     const { data: v } = await supabase.from('videos').select('*').eq('id', id).single()
-
     if (!v) return
     setVideo(v)
-
-    // Mark as seen
     await supabase.from('videos').update({ seen: true }).eq('id', id)
-
-    // Check for existing summary
     const { data: s } = await supabase.from('summaries').select('*').eq('video_id', id).single()
-
     if (s) {
       setSummary(s)
     } else {
@@ -62,10 +59,8 @@ export default function VideoScreen() {
     setProcessing(true)
     setProgress(0)
     setStep(0)
-
     const total = 60
     let elapsed = 0
-
     intervalRef.current = setInterval(() => {
       elapsed++
       const pct = Math.min(90, (elapsed / total) * 90)
@@ -74,24 +69,21 @@ export default function VideoScreen() {
       if (pct > 45) setStep(2)
       if (pct > 70) setStep(3)
     }, 1000)
-
     summarizeVideo(v)
   }
 
   async function summarizeVideo(v: Video) {
     try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession()
+      const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY}`,
+      }
 
-      const res = await fetch(
+      const submitRes = await fetch(
         `${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/summarize-video`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY}`,
-          },
+          headers,
           body: JSON.stringify({
             videoId: v.id,
             videoTitle: v.title,
@@ -101,39 +93,140 @@ export default function VideoScreen() {
         }
       )
 
-      const result = await res.json()
-      console.log('edge function result:', JSON.stringify(result).slice(0, 200))
+      const submitResult = await submitRes.json()
+      console.log('submit result:', JSON.stringify(submitResult))
+      if (!submitResult.success) throw new Error(submitResult.error)
 
-      if (!result.success) throw new Error(result.error)
+      if (submitResult.status === 'no_transcript') {
+        await summarizeWithTitleOnly(v, headers)
+        return
+      }
 
-      const parsed = result.data
-
-      const { data: saved, error: saveError } = await supabase
-        .from('summaries')
-        .insert({
-          video_id: v.id,
-          summary: parsed.summary,
-          green_flags: parsed.green_flags,
-          red_flags: parsed.red_flags,
-          talking_points: parsed.talking_points,
-        })
-        .select()
-        .single()
-
-      console.log('save error:', saveError)
-
-      if (intervalRef.current) clearInterval(intervalRef.current)
-      setProgress(100)
-
-      setTimeout(() => {
-        setProcessing(false)
-        if (saved) setSummary(saved)
-      }, 600)
+      const jobId = submitResult.jobId
+      let attempts = 0
+      while (attempts < 24) {
+        await new Promise((resolve) => setTimeout(resolve, 5000))
+        attempts++
+        const checkRes = await fetch(
+          `${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/check-transcript`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              jobId,
+              videoId: v.id,
+              videoTitle: v.title,
+              videoDescription: v.description,
+            }),
+          }
+        )
+        const checkResult = await checkRes.json()
+        console.log('check result status:', checkResult.status)
+        if (checkResult.status === 'completed') {
+          await saveSummary(v, checkResult.data)
+          return
+        }
+        if (checkResult.status === 'error') {
+          await summarizeWithTitleOnly(v, headers)
+          return
+        }
+      }
+      await summarizeWithTitleOnly(v, headers)
     } catch (e: any) {
       console.log('summarize error:', e.message)
       if (intervalRef.current) clearInterval(intervalRef.current)
       setProcessing(false)
     }
+  }
+
+  async function summarizeWithTitleOnly(v: Video, headers: any) {
+    const res = await fetch(
+      `${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/check-transcript`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          jobId: null,
+          videoId: v.id,
+          videoTitle: v.title,
+          videoDescription: v.description,
+          skipTranscript: true,
+        }),
+      }
+    )
+    const result = await res.json()
+    if (result.data) await saveSummary(v, result.data)
+  }
+
+  async function saveSummary(v: Video, parsed: any) {
+    const { data: saved, error: saveError } = await supabase
+      .from('summaries')
+      .insert({
+        video_id: v.id,
+        summary: parsed.summary,
+        green_flags: parsed.green_flags,
+        red_flags: parsed.red_flags,
+        talking_points: parsed.talking_points,
+      })
+      .select()
+      .single()
+    console.log('save error:', saveError)
+    if (intervalRef.current) clearInterval(intervalRef.current)
+    setProgress(100)
+    setTimeout(() => {
+      setProcessing(false)
+      if (saved) setSummary(saved)
+    }, 600)
+  }
+
+  async function loadComments() {
+    if (commentsLoaded) return
+    setCommentsLoading(true)
+
+    const { data: existing } = await supabase
+      .from('comments')
+      .select('*')
+      .eq('video_id', id)
+      .order('like_count', { ascending: false })
+
+    if (existing && existing.length > 0) {
+      setComments(existing)
+      setCommentsLoaded(true)
+      setCommentsLoading(false)
+      return
+    }
+
+    if (!video) return
+
+    const res = await fetch(
+      `${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/analyze-comments`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({
+          youtubeVideoId: video.youtube_video_id,
+          videoTitle: video.title,
+        }),
+      }
+    )
+
+    const result = await res.json()
+    console.log('comments result:', result.success, result.comments?.length)
+
+    if (result.success && result.comments?.length > 0) {
+      const toInsert = result.comments.map((c: any) => ({ ...c, video_id: id }))
+      const { data: saved } = await supabase
+        .from('comments')
+        .upsert(toInsert, { onConflict: 'youtube_comment_id' })
+        .select()
+      if (saved) setComments(saved)
+    }
+
+    setCommentsLoaded(true)
+    setCommentsLoading(false)
   }
 
   if (!video) return <ActivityIndicator style={{ flex: 1 }} />
@@ -149,12 +242,10 @@ export default function VideoScreen() {
             {video.title}
           </Text>
         </View>
-
         <View style={styles.processingContent}>
           <Text style={styles.processingIcon}>🔍</Text>
           <Text style={styles.processingTitle}>Reviewing this video for you</Text>
           <Text style={styles.processingSub}>Takes about 30–60 seconds</Text>
-
           <View style={styles.stepsList}>
             {steps.map((s, i) => (
               <View
@@ -170,7 +261,6 @@ export default function VideoScreen() {
               </View>
             ))}
           </View>
-
           <View style={styles.progressTrack}>
             <View style={[styles.progressFill, { width: `${progress}%` }]} />
           </View>
@@ -183,6 +273,9 @@ export default function VideoScreen() {
   }
 
   if (!summary) return null
+
+  const flaggedComments = comments.filter((c) => c.flagged)
+  const normalComments = comments.filter((c) => !c.flagged)
 
   return (
     <View style={styles.container}>
@@ -203,16 +296,26 @@ export default function VideoScreen() {
       </View>
 
       <View style={styles.tabBar}>
-        {(['summary', 'flags', 'talking'] as Tab[]).map((t) => (
+        {(['summary', 'flags', 'talking', 'comments'] as Tab[]).map((t) => (
           <TouchableOpacity
             key={t}
             style={[styles.tabBtn, tab === t && styles.tabBtnActive]}
-            onPress={() => setTab(t)}
+            onPress={() => {
+              setTab(t)
+              if (t === 'comments') loadComments()
+            }}
           >
             <Text style={[styles.tabText, tab === t && styles.tabTextActive]}>
-              {t === 'summary' ? 'Summary' : t === 'flags' ? 'Flags' : 'Talking points'}
+              {t === 'summary'
+                ? 'Summary'
+                : t === 'flags'
+                  ? 'Flags'
+                  : t === 'talking'
+                    ? 'Talking'
+                    : 'Comments'}
             </Text>
             {t === 'flags' && summary.red_flags?.length > 0 && <View style={styles.redDot} />}
+            {t === 'comments' && flaggedComments.length > 0 && <View style={styles.redDot} />}
           </TouchableOpacity>
         ))}
       </View>
@@ -233,7 +336,6 @@ export default function VideoScreen() {
                 </View>
               ))
             )}
-
             <Text style={[styles.flagsHeader, { marginTop: 24 }]}>⚑ Worth a conversation</Text>
             {(summary.red_flags || []).length === 0 ? (
               <Text style={styles.emptyFlags}>Nothing flagged. Looks good.</Text>
@@ -258,6 +360,56 @@ export default function VideoScreen() {
             ))}
           </View>
         )}
+
+        {tab === 'comments' && (
+          <View>
+            {commentsLoading ? (
+              <View style={{ alignItems: 'center', paddingTop: 40, gap: 12 }}>
+                <ActivityIndicator />
+                <Text style={styles.emptyFlags}>Scanning comments…</Text>
+              </View>
+            ) : comments.length === 0 ? (
+              <Text style={styles.emptyFlags}>No comments found.</Text>
+            ) : (
+              <View style={styles.talkingPoints}>
+                {flaggedComments.length > 0 && (
+                  <View style={{ marginBottom: 16 }}>
+                    <Text style={styles.flagsHeader}>⚑ Flagged comments</Text>
+                    {flaggedComments.map((c, i) => (
+                      <View key={i} style={[styles.flagItem, styles.flagRed]}>
+                        <View style={{ flex: 1 }}>
+                          <Text
+                            style={[styles.flagTextRed, { fontWeight: '600', marginBottom: 2 }]}
+                          >
+                            {c.author}
+                          </Text>
+                          <Text style={styles.flagTextRed}>{c.text}</Text>
+                          {c.flag_reason && (
+                            <Text
+                              style={[
+                                styles.flagTextRed,
+                                { fontSize: 12, marginTop: 4, opacity: 0.8 },
+                              ]}
+                            >
+                              {c.flag_reason}
+                            </Text>
+                          )}
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                )}
+                <Text style={styles.flagsHeader}>All comments</Text>
+                {normalComments.map((c, i) => (
+                  <View key={i} style={styles.talkingPoint}>
+                    <Text style={styles.talkingLabel}>{c.author}</Text>
+                    <Text style={styles.talkingText}>{c.text}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
       </ScrollView>
     </View>
   )
@@ -276,11 +428,7 @@ const styles = StyleSheet.create({
   metaInfo: { flex: 1, justifyContent: 'space-between' },
   videoTitle: { fontSize: 14, fontWeight: '500', color: '#1C1A17', lineHeight: 20 },
   watchLink: { fontSize: 13, color: '#C4593A' },
-  tabBar: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: '#E8E0D4',
-  },
+  tabBar: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#E8E0D4' },
   tabBtn: {
     flex: 1,
     paddingVertical: 12,
@@ -292,15 +440,9 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   tabBtnActive: { borderBottomColor: '#C4593A' },
-  tabText: { fontSize: 13, color: '#8C857C', fontWeight: '500' },
+  tabText: { fontSize: 11, color: '#8C857C', fontWeight: '500' },
   tabTextActive: { color: '#1C1A17' },
-  redDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#C4593A',
-    marginTop: 1,
-  },
+  redDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#C4593A', marginTop: 1 },
   tabContent: { flex: 1 },
   summaryText: { fontSize: 15, lineHeight: 26, color: '#4A4540' },
   flagsContainer: {},
@@ -312,13 +454,7 @@ const styles = StyleSheet.create({
     color: '#8C857C',
     marginBottom: 10,
   },
-  flagItem: {
-    flexDirection: 'row',
-    gap: 10,
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 8,
-  },
+  flagItem: { flexDirection: 'row', gap: 10, padding: 12, borderRadius: 8, marginBottom: 8 },
   flagGreen: { backgroundColor: '#D6EDE3' },
   flagRed: { backgroundColor: '#F0E0D8' },
   flagDot: { fontSize: 8, marginTop: 4 },

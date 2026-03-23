@@ -37,3 +37,16 @@ export type Summary = {
   talking_points: { label: string; point: string }[]
   created_at: string
 }
+
+export type Comment = {
+  id: string
+  video_id: string
+  youtube_comment_id: string
+  author: string | null
+  text: string | null
+  like_count: number
+  published_at: string | null
+  flagged: boolean
+  flag_reason: string | null
+  created_at: string
+}

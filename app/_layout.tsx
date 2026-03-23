@@ -1,13 +1,17 @@
 import { Stack, router } from 'expo-router'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
+import { View, ActivityIndicator, TouchableOpacity, Text } from 'react-native'
 import { supabase } from '../lib/supabase'
 
 export default function RootLayout() {
+  const [loading, setLoading] = useState(true)
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (!session) {
         router.replace('/(auth)/login')
       }
+      setLoading(false)
     })
 
     const {
@@ -24,11 +28,31 @@ export default function RootLayout() {
     return () => subscription.unsubscribe()
   }, [])
 
+  if (loading) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+        <ActivityIndicator />
+      </View>
+    )
+  }
+
   return (
     <Stack>
       <Stack.Screen name="(auth)/login" options={{ headerShown: false }} />
-      <Stack.Screen name="index" options={{ title: 'KidWatch' }} />
+      <Stack.Screen
+        name="index"
+        options={{
+          title: 'KidWatch',
+          headerLeft: () => (
+            <TouchableOpacity onPress={() => router.push('/settings')} style={{ marginRight: 8 }}>
+              <Text style={{ fontSize: 22 }}>⚙️</Text>
+            </TouchableOpacity>
+          ),
+        }}
+      />
       <Stack.Screen name="channel/[id]" options={{ title: 'Videos' }} />
+      <Stack.Screen name="video/[id]" options={{ title: 'Summary' }} />
+      <Stack.Screen name="settings" options={{ title: 'Settings' }} />
     </Stack>
   )
 }

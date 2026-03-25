@@ -1,35 +1,54 @@
 import { View, Text, TouchableOpacity, StyleSheet, Alert, ActivityIndicator } from 'react-native'
 import { useState, useEffect } from 'react'
 import * as WebBrowser from 'expo-web-browser'
-import * as AuthSession from 'expo-auth-session/providers/google'
 import { supabase } from '../lib/supabase'
+import { Linking } from 'react-native'
 
 WebBrowser.maybeCompleteAuthSession()
 
 export default function SettingsScreen() {
   const [youtubeConnected, setYoutubeConnected] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [connecting, setConnecting] = useState(false)
 
-  const [request, response, promptAsync] = AuthSession.useAuthRequest({
-    clientId: process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID!,
-    scopes: [
-      'https://www.googleapis.com/auth/youtube.readonly',
-      'https://www.googleapis.com/auth/youtube.force-ssl',
-    ],
-  })
+  useEffect(() => {
+    // Handle the OAuth redirect when app comes back to foreground
+    const handleUrl = async (url: string) => {
+      console.log('deep link received:', url)
+      if (url.includes('kidwatch://settings')) {
+        // Session should now be updated, check for token
+        const {
+          data: { session },
+        } = await supabase.auth.getSession()
+        if (session?.provider_token) {
+          const {
+            data: { user },
+          } = await supabase.auth.getUser()
+          if (user) {
+            await supabase
+              .from('profiles')
+              .update({
+                youtube_access_token: session.provider_token,
+                youtube_refresh_token: session.provider_refresh_token,
+              })
+              .eq('id', user.id)
+            setYoutubeConnected(true)
+            Alert.alert('Connected!', 'YouTube account connected successfully!')
+          }
+        }
+      }
+    }
+
+    Linking.getInitialURL().then((url) => {
+      if (url) handleUrl(url)
+    })
+    const sub = Linking.addEventListener('url', ({ url }) => handleUrl(url))
+    return () => sub.remove()
+  }, [])
 
   useEffect(() => {
     checkYoutubeConnection()
   }, [])
-
-  useEffect(() => {
-    if (response?.type === 'success') {
-      const { authentication } = response
-      if (authentication?.accessToken) {
-        saveYoutubeToken(authentication.accessToken, authentication.refreshToken)
-      }
-    }
-  }, [response])
 
   async function checkYoutubeConnection() {
     const {
@@ -45,20 +64,36 @@ export default function SettingsScreen() {
     setLoading(false)
   }
 
-  async function saveYoutubeToken(accessToken: string, refreshToken?: string | null) {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
-    if (!user) return
-    await supabase
-      .from('profiles')
-      .update({
-        youtube_access_token: accessToken,
-        youtube_refresh_token: refreshToken,
-      })
-      .eq('id', user.id)
-    setYoutubeConnected(true)
-    Alert.alert('Connected!', 'YouTube is now connected. Transcripts will be available for videos.')
+  async function connectYoutube() {
+    setConnecting(true)
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        scopes:
+          'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl',
+        redirectTo: 'kidwatch://settings',
+        queryParams: {
+          access_type: 'offline',
+          prompt: 'consent',
+        },
+      },
+    })
+
+    console.log('oauth data:', JSON.stringify(data))
+    console.log('oauth error:', error)
+
+    if (error) {
+      Alert.alert('Error', error.message)
+      setConnecting(false)
+      return
+    }
+
+    // Open the URL in browser
+    if (data?.url) {
+      await WebBrowser.openBrowserAsync(data.url)
+    }
+
+    setConnecting(false)
   }
 
   async function disconnectYoutube() {
@@ -101,8 +136,16 @@ export default function SettingsScreen() {
             <Text style={styles.settingDesc}>
               Connect your child's YouTube account to enable transcript-based summaries.
             </Text>
-            <TouchableOpacity style={styles.btn} onPress={() => promptAsync()} disabled={!request}>
-              <Text style={styles.btnText}>Connect YouTube account</Text>
+            <TouchableOpacity
+              style={[styles.btn, connecting && styles.btnDisabled]}
+              onPress={connectYoutube}
+              disabled={connecting}
+            >
+              {connecting ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.btnText}>Connect YouTube account</Text>
+              )}
             </TouchableOpacity>
           </View>
         )}
@@ -143,6 +186,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     alignItems: 'center',
   },
+  btnDisabled: { opacity: 0.5 },
   btnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
   secondaryBtn: {
     borderWidth: 1,

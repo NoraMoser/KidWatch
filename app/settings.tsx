@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react'
 import * as WebBrowser from 'expo-web-browser'
 import { supabase } from '../lib/supabase'
 import { Linking } from 'react-native'
+import { AppState } from 'react-native'
 
 WebBrowser.maybeCompleteAuthSession()
 
@@ -15,11 +16,16 @@ export default function SettingsScreen() {
     // Handle the OAuth redirect when app comes back to foreground
     const handleUrl = async (url: string) => {
       console.log('deep link received:', url)
-      if (url.includes('kidwatch://settings')) {
-        // Session should now be updated, check for token
+      if (
+        url.includes('kidwatch://oauth') ||
+        url.includes('access_token') ||
+        url.includes('code=')
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 1000))
         const {
           data: { session },
         } = await supabase.auth.getSession()
+        console.log('provider_token after oauth:', session?.provider_token ? 'YES' : 'NO')
         if (session?.provider_token) {
           const {
             data: { user },
@@ -33,7 +39,7 @@ export default function SettingsScreen() {
               })
               .eq('id', user.id)
             setYoutubeConnected(true)
-            Alert.alert('Connected!', 'YouTube account connected successfully!')
+            Alert.alert('Connected!', 'YouTube connected successfully!')
           }
         }
       }
@@ -71,7 +77,7 @@ export default function SettingsScreen() {
       options: {
         scopes:
           'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl',
-        redirectTo: 'kidwatch://settings',
+        redirectTo: 'kidwatch://oauth',
         queryParams: {
           access_type: 'offline',
           prompt: 'consent',
@@ -79,21 +85,42 @@ export default function SettingsScreen() {
       },
     })
 
-    console.log('oauth data:', JSON.stringify(data))
-    console.log('oauth error:', error)
-
-    if (error) {
-      Alert.alert('Error', error.message)
+    if (error || !data?.url) {
+      Alert.alert('Error', error?.message || 'No URL returned')
       setConnecting(false)
       return
     }
 
-    // Open the URL in browser
-    if (data?.url) {
-      await WebBrowser.openBrowserAsync(data.url)
-    }
+    // Listen for app coming back to foreground
+    const subscription = AppState.addEventListener('change', async (state) => {
+      if (state === 'active') {
+        subscription.remove()
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        const {
+          data: { session },
+        } = await supabase.auth.getSession()
+        console.log('provider_token:', session?.provider_token ? 'YES' : 'NO')
+        if (session?.provider_token) {
+          const {
+            data: { user },
+          } = await supabase.auth.getUser()
+          if (user) {
+            await supabase
+              .from('profiles')
+              .update({
+                youtube_access_token: session.provider_token,
+                youtube_refresh_token: session.provider_refresh_token,
+              })
+              .eq('id', user.id)
+            setYoutubeConnected(true)
+            Alert.alert('Connected!', 'YouTube connected successfully!')
+          }
+        }
+        setConnecting(false)
+      }
+    })
 
-    setConnecting(false)
+    await WebBrowser.openBrowserAsync(data.url)
   }
 
   async function disconnectYoutube() {

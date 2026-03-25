@@ -2,10 +2,16 @@ import { Stack, router } from 'expo-router'
 import { useEffect, useState } from 'react'
 import { View, ActivityIndicator, TouchableOpacity, Text } from 'react-native'
 import { supabase } from '../lib/supabase'
+import { Linking } from 'react-native'
 
 export default function RootLayout() {
   const [loading, setLoading] = useState(true)
 
+  useEffect(() => {
+    Linking.getInitialURL().then((url) => console.log('initial URL:', url))
+    const sub = Linking.addEventListener('url', ({ url }) => console.log('URL event:', url))
+    return () => sub.remove()
+  }, [])
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (!session) {
@@ -53,6 +59,7 @@ export default function RootLayout() {
       <Stack.Screen name="channel/[id]" options={{ title: 'Videos' }} />
       <Stack.Screen name="video/[id]" options={{ title: 'Summary' }} />
       <Stack.Screen name="settings" options={{ title: 'Settings' }} />
+      <Stack.Screen name="oauth" options={{ headerShown: false }} />
     </Stack>
   )
 }
